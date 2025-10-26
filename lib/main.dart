@@ -1,16 +1,41 @@
-import 'dart:io';
-import 'dart:typed_data';
 import 'dart:async';
+import 'dart:io';
 import 'dart:ui' as ui;
 
+import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:image/image.dart' as img;
 import 'package:image_picker/image_picker.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:tflite_flutter/tflite_flutter.dart';
 
 void main() {
   runApp(const MyApp());
+}
+
+Future<Interpreter?> _loadSegmentationInterpreter() async {
+  try {
+    return await Interpreter.fromAsset('assets/segmentation_model_quant.tflite');
+  } catch (eAsset) {
+    try {
+      return await Interpreter.fromAsset('segmentation_model_quant.tflite');
+    } catch (ePlain) {
+      debugPrint('Failed to load interpreter: $eAsset ; $ePlain');
+      return null;
+    }
+  }
+}
+
+List<int> _maskColorForClass(int classIndex, {int alpha = 255}) {
+  switch (classIndex) {
+    case 0:
+      return <int>[128, 0, 128, alpha];
+    case 1:
+      return <int>[255, 255, 0, alpha];
+    default:
+      return <int>[255, 0, 0, alpha];
+  }
 }
 
 class MyApp extends StatelessWidget {
@@ -59,7 +84,7 @@ class _HomePageState extends State<HomePage> {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error al abrir la galería: $e')));
       }
-      print('pickImage error: $e');
+  debugPrint('pickImage error: $e');
     }
   }
 
@@ -116,27 +141,15 @@ class _HomePageState extends State<HomePage> {
 
     // Step 3: load interpreter
     setState(() => _progress = 0.35);
-    Interpreter interpreter;
-    try {
-      // First try the full asset path as declared in pubspec.yaml
-      interpreter = await Interpreter.fromAsset('assets/segmentation_model_quant.tflite');
-      print('Interpreter loaded: assets/segmentation_model_quant.tflite');
-    } catch (e1) {
-      print('Interpreter.fromAsset("assets/...") failed: $e1');
-      // Fallback: some projects register assets without the leading folder
-      try {
-        interpreter = await Interpreter.fromAsset('segmentation_model_quant.tflite');
-        print('Interpreter loaded: segmentation_model_quant.tflite');
-      } catch (e2) {
-        print('Failed to load interpreter with both names: $e1 ; $e2');
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('No se pudo cargar el modelo: $e2')));
-        }
-        setState(() {
-          _processing = false;
-        });
-        return;
+    final Interpreter? interpreter = await _loadSegmentationInterpreter();
+    if (interpreter == null) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('No se pudo cargar el modelo para realizar la segmentación.')));
       }
+      setState(() {
+        _processing = false;
+      });
+      return;
     }
 
     // Prepare output buffer: shape [1,128,128,3]
@@ -147,7 +160,7 @@ class _HomePageState extends State<HomePage> {
     try {
       interpreter.run(input, output);
     } catch (e) {
-      print('Interpreter run error: $e');
+  debugPrint('Interpreter run error: $e');
       interpreter.close();
       setState(() {
         _processing = false;
@@ -155,7 +168,7 @@ class _HomePageState extends State<HomePage> {
       return;
     }
 
-    print('Interpreter run completed — postprocessing...');
+  debugPrint('Interpreter run completed — postprocessing...');
 
     setState(() => _progress = 0.8);
 
@@ -175,25 +188,11 @@ class _HomePageState extends State<HomePage> {
           }
         }
         final int base = (y * maskW + x) * 4;
-        if (maxIdx == 0) {
-          // outer background rendered purple
-          maskBuffer[base] = 128;
-          maskBuffer[base + 1] = 0;
-          maskBuffer[base + 2] = 128;
-          maskBuffer[base + 3] = 255;
-        } else if (maxIdx == 1) {
-          // border rendered solid yellow
-          maskBuffer[base] = 255;
-          maskBuffer[base + 1] = 255;
-          maskBuffer[base + 2] = 0;
-          maskBuffer[base + 3] = 255;
-        } else {
-          // inner region rendered solid red
-          maskBuffer[base] = 255;
-          maskBuffer[base + 1] = 0;
-          maskBuffer[base + 2] = 0;
-          maskBuffer[base + 3] = 255;
-        }
+        final List<int> color = _maskColorForClass(maxIdx, alpha: 255);
+        maskBuffer[base] = color[0];
+        maskBuffer[base + 1] = color[1];
+        maskBuffer[base + 2] = color[2];
+        maskBuffer[base + 3] = color[3];
       }
     }
 
@@ -274,6 +273,11 @@ class _HomePageState extends State<HomePage> {
     });
   }
 
+  Future<void> _openCameraSegmentation() async {
+    if (!mounted) return;
+    await Navigator.of(context).push(MaterialPageRoute<void>(builder: (_) => const CameraSegmentationPage()));
+  }
+
   Future<bool> _ensureSavePermission() async {
     if (Platform.isIOS) {
       final status = await Permission.photos.request();
@@ -312,14 +316,14 @@ class _HomePageState extends State<HomePage> {
         },
       );
       if (savedUri != null) {
-        print('Imagen guardada en: $savedUri');
+        debugPrint('Imagen guardada en: $savedUri');
       }
       return savedUri;
     } on PlatformException catch (e) {
-      print('Error al guardar imagen (PlatformException): ${e.message}');
+  debugPrint('Error al guardar imagen (PlatformException): ${e.message}');
       return null;
     } catch (e) {
-      print('Error al guardar imagen: $e');
+  debugPrint('Error al guardar imagen: $e');
       return null;
     }
   }
@@ -347,8 +351,10 @@ class _HomePageState extends State<HomePage> {
               const SizedBox(height: 8),
               Text('Resultado guardado: $_savedPath'),
             ],
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+            Wrap(
+              alignment: WrapAlignment.center,
+              spacing: 12,
+              runSpacing: 8,
               children: [
                 ElevatedButton.icon(
                   onPressed: _pickImage,
@@ -360,6 +366,11 @@ class _HomePageState extends State<HomePage> {
                   icon: const Icon(Icons.play_arrow),
                   label: const Text('Empezar'),
                 ),
+                ElevatedButton.icon(
+                  onPressed: _openCameraSegmentation,
+                  icon: const Icon(Icons.videocam),
+                  label: const Text('Usar cámara'),
+                ),
               ],
             ),
             const SizedBox(height: 12),
@@ -368,4 +379,351 @@ class _HomePageState extends State<HomePage> {
       ),
     );
   }
+}
+
+class CameraSegmentationPage extends StatefulWidget {
+  const CameraSegmentationPage({super.key});
+
+  @override
+  State<CameraSegmentationPage> createState() => _CameraSegmentationPageState();
+}
+
+class _CameraSegmentationPageState extends State<CameraSegmentationPage> {
+  CameraController? _controller;
+  Interpreter? _interpreter;
+  bool _initializing = true;
+  bool _processingFrame = false;
+  Uint8List? _latestMaskBytes;
+  int _frameCounter = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    _initializePipeline();
+  }
+
+  @override
+  void dispose() {
+    _disposePipeline();
+    super.dispose();
+  }
+
+  Future<void> _disposePipeline() async {
+    try {
+      if (_controller != null && _controller!.value.isStreamingImages) {
+        await _controller!.stopImageStream();
+      }
+    } catch (_) {
+      // Ignored: stopping the stream can fail if it was never started.
+    }
+    await _controller?.dispose();
+    _controller = null;
+    _interpreter?.close();
+    _interpreter = null;
+  }
+
+  Future<void> _initializePipeline() async {
+    final PermissionStatus camStatus = await Permission.camera.request();
+    if (!camStatus.isGranted) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Se requiere permiso de cámara para el modo en vivo.')));
+      Navigator.of(context).pop();
+      return;
+    }
+
+    try {
+      final List<CameraDescription> cameras = await availableCameras();
+      if (cameras.isEmpty) {
+        throw Exception('No se encontraron cámaras disponibles.');
+      }
+      final CameraDescription selected = cameras.firstWhere(
+        (CameraDescription cam) => cam.lensDirection == CameraLensDirection.back,
+        orElse: () => cameras.first,
+      );
+      final CameraController controller = CameraController(
+        selected,
+        ResolutionPreset.medium,
+        enableAudio: false,
+        imageFormatGroup: ImageFormatGroup.yuv420,
+      );
+
+      await controller.initialize();
+
+      final Interpreter? interpreter = await _loadSegmentationInterpreter();
+      if (interpreter == null) {
+        await controller.dispose();
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('No se pudo cargar el modelo para la cámara.')));
+        Navigator.of(context).pop();
+        return;
+      }
+
+      _controller = controller;
+      _interpreter = interpreter;
+
+      if (mounted) {
+        setState(() {
+      _initializing = false;
+        });
+      }
+
+      await controller.startImageStream(_processCameraImage);
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('No se pudo iniciar la cámara: $e')));
+      Navigator.of(context).pop();
+    }
+  }
+
+  void _processCameraImage(CameraImage image) {
+    if (!mounted || _interpreter == null) {
+      return;
+    }
+    if (_processingFrame) {
+      return;
+    }
+    _frameCounter = (_frameCounter + 1) % 4;
+    if (_frameCounter != 0) {
+      return;
+    }
+    _processingFrame = true;
+    _handleFrame(image).whenComplete(() {
+      _processingFrame = false;
+    });
+  }
+
+  Future<void> _handleFrame(CameraImage image) async {
+    final _MaskFrame? maskFrame = await _buildMaskForCameraImage(image);
+    if (!mounted || maskFrame == null) {
+      return;
+    }
+    setState(() {
+      _latestMaskBytes = maskFrame.bytes;
+    });
+  }
+
+  Future<_MaskFrame?> _buildMaskForCameraImage(CameraImage image) async {
+    final Interpreter? interpreter = _interpreter;
+    final CameraController? controller = _controller;
+    if (interpreter == null || controller == null) {
+      return null;
+    }
+
+    final img.Image? rgbImage = _convertYuv420ToImage(image);
+    if (rgbImage == null) {
+      return null;
+    }
+
+    final img.Image resized = img.copyResize(
+      rgbImage,
+      width: 128,
+      height: 128,
+      interpolation: img.Interpolation.average,
+    );
+
+    final List<List<List<List<int>>>> input =
+        List.generate(1, (_) => List.generate(128, (_) => List.generate(128, (_) => List.filled(3, 0))));
+    for (int y = 0; y < 128; y++) {
+      for (int x = 0; x < 128; x++) {
+  final img.Pixel pixel = resized.getPixel(x, y);
+  input[0][y][x][0] = pixel.r.toInt();
+  input[0][y][x][1] = pixel.g.toInt();
+  input[0][y][x][2] = pixel.b.toInt();
+      }
+    }
+
+    final List<List<List<List<int>>>> output =
+        List.generate(1, (_) => List.generate(128, (_) => List.generate(128, (_) => List.filled(3, 0))));
+
+    try {
+      interpreter.run(input, output);
+    } catch (e) {
+      debugPrint('Interpreter run error (camera): $e');
+      return null;
+    }
+
+    final img.Image mask = img.Image(width: 128, height: 128);
+    for (int y = 0; y < 128; y++) {
+      for (int x = 0; x < 128; x++) {
+        final List<int> vals = output[0][y][x];
+        int maxIdx = 0;
+        int maxVal = vals[0];
+        for (int c = 1; c < vals.length; c++) {
+          if (vals[c] > maxVal) {
+            maxVal = vals[c];
+            maxIdx = c;
+          }
+        }
+        final int alpha = maxIdx == 0 ? 160 : 220;
+        final List<int> color = _maskColorForClass(maxIdx, alpha: alpha);
+        mask.setPixelRgba(x, y, color[0], color[1], color[2], color[3]);
+      }
+    }
+
+    img.Image expanded = img.copyResize(
+      mask,
+      width: rgbImage.width,
+      height: rgbImage.height,
+      interpolation: img.Interpolation.nearest,
+    );
+
+    expanded = _orientMaskForPreview(expanded, controller);
+
+    final Uint8List bytes = Uint8List.fromList(img.encodePng(expanded));
+    return _MaskFrame(bytes: bytes, width: expanded.width, height: expanded.height);
+  }
+
+  img.Image _orientMaskForPreview(img.Image mask, CameraController controller) {
+    img.Image oriented = mask;
+    final int rotation = controller.description.sensorOrientation % 360;
+    if (rotation == 90) {
+      oriented = img.copyRotate(oriented, angle: 90);
+    } else if (rotation == 180) {
+      oriented = img.copyRotate(oriented, angle: 180);
+    } else if (rotation == 270) {
+      oriented = img.copyRotate(oriented, angle: 270);
+    }
+
+    if (controller.description.lensDirection == CameraLensDirection.front) {
+      oriented = img.flipHorizontal(oriented);
+    }
+
+    final Size? previewSize = controller.value.previewSize;
+    if (previewSize != null) {
+      final bool swap = rotation == 90 || rotation == 270;
+      final int targetWidth = swap ? previewSize.height.round() : previewSize.width.round();
+      final int targetHeight = swap ? previewSize.width.round() : previewSize.height.round();
+      if (targetWidth > 0 && targetHeight > 0) {
+        oriented = img.copyResize(
+          oriented,
+          width: targetWidth,
+          height: targetHeight,
+          interpolation: img.Interpolation.nearest,
+        );
+      }
+    }
+
+    return oriented;
+  }
+
+  img.Image? _convertYuv420ToImage(CameraImage image) {
+    if (image.format.group != ImageFormatGroup.yuv420 || image.planes.length < 3) {
+      return null;
+    }
+
+    final int width = image.width;
+    final int height = image.height;
+    final img.Image converted = img.Image(width: width, height: height);
+
+    final Plane planeY = image.planes[0];
+    final Plane planeU = image.planes[1];
+    final Plane planeV = image.planes[2];
+
+    final Uint8List bytesY = planeY.bytes;
+    final Uint8List bytesU = planeU.bytes;
+    final Uint8List bytesV = planeV.bytes;
+
+    final int strideY = planeY.bytesPerRow;
+    final int strideU = planeU.bytesPerRow;
+    final int strideV = planeV.bytesPerRow;
+    final int pixelStrideU = planeU.bytesPerPixel ?? 1;
+    final int pixelStrideV = planeV.bytesPerPixel ?? 1;
+
+    for (int y = 0; y < height; y++) {
+      final int uvRow = (y >> 1);
+      final int yRowOffset = y * strideY;
+      final int uRowOffset = uvRow * strideU;
+      final int vRowOffset = uvRow * strideV;
+      for (int x = 0; x < width; x++) {
+        final int yIndex = yRowOffset + x;
+        final int uvColumn = (x >> 1);
+        final int uIndex = uRowOffset + uvColumn * pixelStrideU;
+        final int vIndex = vRowOffset + uvColumn * pixelStrideV;
+
+        final int yValue = bytesY[yIndex];
+        final int uValue = bytesU[uIndex];
+        final int vValue = bytesV[vIndex];
+
+        final int r = _clampToByte(yValue + 1.402 * (vValue - 128));
+        final int g = _clampToByte(yValue - 0.344136 * (uValue - 128) - 0.714136 * (vValue - 128));
+        final int b = _clampToByte(yValue + 1.772 * (uValue - 128));
+
+        converted.setPixelRgba(x, y, r, g, b, 255);
+      }
+    }
+
+    return converted;
+  }
+
+  int _clampToByte(num value) {
+    if (value < 0) {
+      return 0;
+    }
+    if (value > 255) {
+      return 255;
+    }
+    return value.round();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final CameraController? controller = _controller;
+    return Scaffold(
+      appBar: AppBar(title: const Text('Segmentación en vivo')),
+      body: _initializing
+          ? const Center(child: CircularProgressIndicator())
+          : (controller == null || _interpreter == null)
+              ? const Center(child: Text('No se pudo inicializar la cámara'))
+              : ColoredBox(
+                  color: Colors.black,
+                  child: Center(
+                    child: AspectRatio(
+                      aspectRatio: controller.value.aspectRatio,
+                      child: Stack(
+                        fit: StackFit.expand,
+                        children: [
+                          CameraPreview(controller),
+                          if (_latestMaskBytes != null)
+                            Image.memory(
+                              _latestMaskBytes!,
+                              fit: BoxFit.cover,
+                              gaplessPlayback: true,
+                            ),
+                          Positioned(
+                            left: 16,
+                            bottom: 16,
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                              decoration: BoxDecoration(
+                                color: Colors.black.withValues(alpha: 0.4),
+                                borderRadius: BorderRadius.circular(12),
+                              ),
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  const Icon(Icons.pets, color: Colors.white),
+                                  const SizedBox(width: 8),
+                                  Text(
+                                    _processingFrame ? 'Detectando…' : 'Listo',
+                                    style: const TextStyle(color: Colors.white),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+    );
+  }
+}
+
+class _MaskFrame {
+  const _MaskFrame({required this.bytes, required this.width, required this.height});
+
+  final Uint8List bytes;
+  final int width;
+  final int height;
 }
